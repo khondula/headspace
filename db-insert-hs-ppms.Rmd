@@ -65,6 +65,9 @@ data.frame(sites = sites,
 ```
 
 add new sites to database if needed
+```{r, include=FALSE}
+source('R/db_add_site.R')
+```
 
 ```{r addsites, eval=FALSE}
 db_add_site(samplingfeaturecode = "BBout", samplingfeaturedescription = "outflow of Bubbly Bay", samplingfeaturename = "BB out", samplingfeaturetypecv = "site")
@@ -88,6 +91,9 @@ dbGetQuery(db, "SELECT * FROM odm2.methods") %>% kable()
 ```
 
 Add new methods if they don't exist
+```{r, include=FALSE}
+soure('R/db_add_method.R')
+```
 
 ```{r addmethods, eval=FALSE}
 db_add_method(methodtypecv = "specimenCollection",
@@ -113,6 +119,11 @@ dbGetQuery(db, "SELECT * FROM odm2.variables") %>% kable()
 ```
 
 add variables 
+
+```{r, include=FALSE}
+source('R/db_add_new_variable.R')
+```
+
 ```{r addvars, eval=FALSE}
 db_add_new_variable(variabletypecv = "WaterQuality", variablecode = "methane", variablenamecv = "Methane", variabledefinition = "Methane (CH4)")
 db_add_new_variable(variabletypecv = "WaterQuality", variablecode = "carbonDioxide", variablenamecv = "Carbon dioxide", variabledefinition = "Carbon dioxide (CO2)")
@@ -156,17 +167,6 @@ gc_for_db$gc_datetime <- strptime(paste(gc_for_db$gc_date, gc_for_db$gc_time),
 ```{r}
 utcoffset <- format(Sys.time(), "%z")
 utcoffset <- as.integer(substr(utcoffset, 1,3))
-```
-
-```{r}
-resulttypecv = "measurement"
-censorcodecv = "notCensored"
-qualitycodecv = "unknown"
-aggregationstatisticcv = "sporadic"
-timeaggregationinterval = 1 # assume 1 minute
-timeaggregationintervalunitsid = 1157 # minute
-processlinglevel = 2
-valuecount = 1
 ```
 
 ## Insert new samples
@@ -367,35 +367,8 @@ dbWriteTable(db, c("odm2","relatedfeatures"),
 
 Get all headspace samples and paired source air samples
 
-```{r}
-db_get_hs_sources <- function(){
-  sql <- "WITH t1 AS(
-    SELECT 
-      REL.samplingfeatureid,
-      SF.samplingfeaturecode,
-      REL.relationshiptypecv,
-      REL.relatedfeatureid
-    FROM 
-     odm2.relatedfeatures REL,
-     odm2.samplingfeatures SF
-    WHERE 
-     REL.samplingfeatureid = SF.samplingfeatureid
-     AND REL.relationshiptypecv = 'isPartOf')
-
-    SELECT
-      t1.samplingfeaturecode source,
-      SF2.samplingfeaturecode HS
-    FROM
-      t1,
-      odm2.samplingfeatures SF2
-    WHERE
-      t1.relatedfeatureid = SF2.samplingfeatureid
-  "
-sql <- gsub("\n", " ", sql)
-
-dbGetQuery(db, sql)  
-}
-
+```{r, include=FALSE}
+source('R/db_get_hs_sources.R')
 ```
 
 ```{r}
