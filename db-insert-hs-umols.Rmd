@@ -19,6 +19,8 @@ library(uuid)
 library(tidyr)
 library(lubridate)
 library(magrittr)
+library(ggplot2)
+library(RColorBrewer)
 ```
 
 ```{r connect, include=FALSE, message=FALSE}
@@ -30,11 +32,11 @@ db <- dbConnect(PostgreSQL(),
                 password = password)
 ```
 
-## Description
+# Description
 
 Calculate dissolved gas concentrations for headspace samples from PPM data. Then insert dissolved gas concentration data into database.
 
-## Data
+# Data
 
 * Get PPM data from database for source air and samples
 * ppmv data for source gas - determined from GC workflow
@@ -167,7 +169,7 @@ source('def.calc.sdg.R')
 
 Use function by supplying column names and defaults. Output is concentrations and 100% saturation concentrations as additional columns on the data frame. 
 
-```{r, eval=FALSE}
+```{r}
 sdg_out <- def.calc.sdg(inputFile = sdg_data)
 ```
 
@@ -181,18 +183,266 @@ sdg_results <- sdg_out %>%
   dplyr::select(hs, site, date, valuedatetime, dissolvedCH4_umol, dissolvedCO2_umol, satCH4_umol)
 ```
 
+# Plots 
+
+woo data!
+
+```{r}
+
+# make the hs id a factor with the order corresponding to what site the samples are from
+sdg_results$hs_factor <- factor(sdg_results$hs, ordered = TRUE, levels = sdg_results[order(sdg_results$site),"hs"])
+
+sdg_results %>%
+  gather(key = gas, value = umol_per_L, dissolvedCH4_umol:satCH4_umol) %>%
+  filter(gas %in% c("dissolvedCH4_umol", "dissolvedCO2_umol")) %>%
+  ggplot(aes(x = hs_factor, y = umol_per_L, fill = site)) +
+  geom_bar(stat = "identity", col = "black", position = position_dodge()) +
+  facet_wrap(~gas, scales = "free") +
+  coord_flip() +
+  theme_bw() +
+  scale_fill_brewer(palette = "Set1")
+
+```
+
+```{r}
+sdg_results %>%
+  ggplot(aes(x = dissolvedCH4_umol, y = dissolvedCO2_umol, fill = site)) +
+  geom_point(pch = 21, col = "black", size = 4) +
+  theme_bw() + 
+  scale_fill_brewer(palette = "Set1")
+  # scale_y_log10() + scale_x_log10()
+```
+
+```{r}
+sdg_results %>%
+  ggplot(aes(x = dissolvedCH4_umol, y = dissolvedCO2_umol + dissolvedCH4_umol, fill = site)) +
+  geom_point(pch = 21, col = "black", size = 4) +
+  theme_bw() + 
+  scale_fill_brewer(palette = "Set1")
+```
 
 Reshape concentration data to put values in database for each sample
 
 # Insert concentration results
 
-* add action for specimen analysis(?)
-* add feature action with new sample and new action for sample analysis
+Look at the data and assess for quality - add marginal quality code to samples that seem to not be right. 
+
+```{r}
+sdg_results$qualitycode <- "unknown"
+flag_marginal <- c("KLH Feb18xx107", "KLH Feb18xx102", "KLH 596", "KLH 584", "KLH 595", "KLH 504")
+sdg_results[sdg_results$hs %in% flag_marginal, "qualitycode"] <- "marginal"
+```
+
+check for variables and units
+
+```{r, include=FALSE}
+source('R/db_add_new_variable.R')
+```
+
+```{r addvars, eval=FALSE}
+db_add_new_variable(variabletypecv = "WaterQuality", variablecode = "carbonDioxideDissolved", 
+                    variablenamecv = "Carbon Dioxide, dissolved", variabledefinition = "Dissolved Carbon dioxide (CO2)")
+```
+
+```{r}
+dbGetQuery(db, "SELECT * FROM odm2.units WHERE unitsname = 'Micromole per Liter'")
+```
+
+
+```{r, eval=FALSE}
+source('R/db_add_method.R')
+db_add_method(methodtypecv = "derivation",
+              methodcode = "calc_sdg",
+              methodname = "Calculate dissolved gas concentration",
+              methoddescription = "Calculate dissolved gas concentration in surface water based on headspace equilibration data")
+```
+
+```{r}
+utcoffset <- format(Sys.time(), "%z")
+utcoffset <- as.integer(substr(utcoffset, 1,3))
+```
+
+**result metadata**
+
+* Measurement doesn't quite seem like the correct type of result for derived results.
+* Processling level code 3 for an "interpreted product"
+* sampled medium is the dissolved gas so liquid aqueous? 
+
+```{r}
+
+db_insert_sdg_results <- function(x){
+  sql_blanks <- 'WITH
+  newact AS (
+  INSERT INTO odm2.actions (
+    actiontypecv, methodid, begindatetime, begindatetimeutcoffset)
+  VALUES (
+    \'%s\', 
+    (SELECT methodid FROM odm2.methods WHERE methodcode = \'%s\'), 
+    \'%s\', 
+    \'%s\')
+  RETURNING actionid),
+
+  newfa AS (
+  INSERT into odm2.featureactions (
+    samplingfeatureid, actionid)
+  VALUES (
+    (SELECT samplingfeatureid FROM odm2.samplingfeatures WHERE samplingfeaturecode = \'%s\'),
+    (SELECT newact.actionid FROM newact))
+  RETURNING featureactionid),
+
+  newresult AS (
+  INSERT INTO odm2.results (
+    featureactionid, resultuuid, resulttypecv, variableid, unitsid, processinglevelid, sampledmediumcv, valuecount)
+  VALUES (
+    
+    (SELECT newfa.featureactionid FROM newfa),
+    \'%s\',
+    \'%s\',
+    (SELECT variableid FROM odm2.variables WHERE variablecode = \'methaneDissolved\'),
+    (SELECT unitsid FROM odm2.units WHERE unitsname = \'Micromole per Liter\'),
+    \'%s\',
+    \'%s\',
+    \'%s\'),
+  (
+    (SELECT newfa.featureactionid FROM newfa),
+    \'%s\',
+    \'%s\',
+    (SELECT variableid FROM odm2.variables WHERE variablecode = \'carbonDioxideDissolved\'),
+    (SELECT unitsid FROM odm2.units WHERE unitsname = \'Micromole per Liter\'),
+    \'%s\',
+    \'%s\',
+    \'%s\')
+  RETURNING resultid, variableid),
+
+  newmr1 AS (
+  INSERT INTO odm2.measurementresults (
+    resultid,
+    censorcodecv,
+    qualitycodecv,
+    aggregationstatisticcv,
+    timeaggregationinterval,
+    timeaggregationintervalunitsid)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'methaneDissolved\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\', 
+    \'%s\', 
+    \'%s\')),
+
+  newmrv1 AS (
+  INSERT INTO odm2.measurementresultvalues (
+    resultid,
+    datavalue,
+    valuedatetime,
+    valuedatetimeutcoffset)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'methaneDissolved\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\')),
+
+  newmr3 AS (
+  INSERT INTO odm2.measurementresults (
+    resultid,
+    censorcodecv,
+    qualitycodecv,
+    aggregationstatisticcv,
+    timeaggregationinterval,
+    timeaggregationintervalunitsid)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'carbonDioxideDissolved\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\', 
+    \'%s\', 
+    \'%s\'))
+
+  INSERT INTO odm2.measurementresultvalues (
+    resultid,
+    datavalue,
+    valuedatetime,
+    valuedatetimeutcoffset)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'carbonDioxideDissolved\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\')
+'
+  sql <- sprintf(sql_blanks, 
+        "derivation", # actiontypecv
+        "calc_sdg", # methodcode
+        Sys.time(), # begindatetime
+        utcoffset, # utcoffset
+        sdg_results$hs[x], # samplingfeaturecode of sample
+        UUIDgenerate(), #uuid
+        "measurement", # resulttypecv
+        4, # processinglevelid level 3 - analysis using other data
+        "liquidAqueous",# sampledmediumcv
+        1,
+        UUIDgenerate(), #uuid
+        "measurement", # resulttypecv
+        4, # processinglevelid level 3 - analysis using other data
+        "liquidAqueous",# sampledmediumcv
+        1, # valuecount
+        # methane results
+        "notCensored", 
+        sdg_results$qualitycode[x],
+        "sporadic", 1, 1157, 
+        sdg_results$dissolvedCH4_umol[x], sdg_results$valuedatetime[x], utcoffset,
+        # carbon dioxide results
+        "notCensored", 
+        sdg_results$qualitycode[x],
+        "sporadic", 1, 1157,
+        sdg_results$dissolvedCO2_umol[x], sdg_results$valuedatetime[x], utcoffset)
+  
+  sql <- gsub("\n", "", sql)
+  dbGetQuery(db, sql)
+}
+
+```
+
+insert data
+```{r, eval=FALSE}
+db_insert_sdg_results(1) # one at a time
+
+lapply(2:nrow(sdg_results), function(x) db_insert_sdg_results(x)) # or multiple
+
+```
+
 * add 2 results associated with sample analysis feature action - co2 umol per L and ch4 umol per L
 * variable = methaneDissolved, carbonDioxideDissolved
 * units = umol per L
 * add measurement results 
 * add measurement result values
+
+**Query results from database**
+
+```{r}
+sql <- "SELECT mrv.datavalue, mrv.valuedatetime, sf.samplingfeaturecode, r.featureactionid, v.variablecode, u.unitsname, mr.qualitycodecv
+  FROM odm2.measurementresultvalues mrv, odm2.results r, odm2.variables v, odm2.units u, odm2.samplingfeatures sf, odm2.featureactions fa, odm2.methods m, odm2.measurementresults mr
+ WHERE r.variableid = v.variableid 
+ AND r.featureactionid = fa.featureactionid
+ AND fa.samplingfeatureid = sf.samplingfeatureid
+ AND r.unitsid = u.unitsid
+ AND mrv.resultid = r.resultid 
+ AND mr.resultid = r.resultid 
+ AND r.sampledmediumcv = 'liquidAqueous'
+ AND m.methodcode = 'calc_sdg'"
+
+sql <- gsub("\n", "", sql)
+sdg_results_db <- dbGetQuery(db, sql)
+```
+
+then merge with samps join sites table
+
+```{r}
+sdg_results_db %>% 
+  left_join(samps_join_sites, by = c("samplingfeaturecode" = "specimencode")) %>%
+  rename(site = samplingfeaturecode.y) %>% kable()
+```
+
+
 
 add relationship between results to show that umol per L data are derived from ppm data of 2 samples, water temp, pressure data? 
 
