@@ -13,3 +13,6 @@ data/
 * data
     - ppms of sample and source air
     - table of source air and sample combinations
+
+ 
+> This work is part of my "Enhancing Reproducibility in Watershed Science" projected supported by [rOpenSci](https://ropensci.org/) and [SESYNC](https://www.sesync.org/).
