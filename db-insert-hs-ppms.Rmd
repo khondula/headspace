@@ -147,6 +147,8 @@ combine the Field sample date and Time columns into one
 ```{r}
 gc_for_db$datetime <- strptime(paste(gc_for_db$Field_sample_date, gc_for_db$Time),
          format = "%d-%b-%y %H:%M:%S", tz = "")
+gc_for_db$gc_datetime <- strptime(paste(gc_for_db$gc_date, gc_for_db$gc_time),
+         format = "%m/%d/%y %H:%M:%S", tz = "")
 ```
 
 **utc offset**
@@ -400,7 +402,7 @@ dbGetQuery(db, sql)
 db_get_hs_sources() %>% kable()
 ```
 
-## Insert sample data
+## Insert sample PPM data
 
 * add action for specimen analysis 
 * add feature action with new sample and new action for sample analysis
@@ -409,4 +411,280 @@ db_get_hs_sources() %>% kable()
 * units = ppm, Part per Million
 * add measurement results 
 * add measurement result values
+
+**Add method for GC analysis**
+
+```{r}
+db_add_method(methodtypecv = "specimenAnalysis",
+              methodcode = "GC",
+              methodname = "Gas chromatography",
+              methoddescription = "Analyze gas componds on gas chromatograph")
+```
+
+
+```{r}
+sql_blanks <- 'WITH
+  newact AS (
+  INSERT INTO odm2.actions (
+    actiontypecv, methodid, begindatetime, begindatetimeutcoffset)
+  VALUES (
+    \'%s\', 
+    (SELECT methodid FROM odm2.methods WHERE methodcode = \'%s\'), 
+    \'%s\', 
+    \'%s\')
+  RETURNING actionid),
+
+  newfa AS (
+  INSERT into odm2.featureactions (
+    samplingfeatureid, actionid)
+  VALUES (
+    (SELECT samplingfeatureid FROM odm2.samplingfeatures WHERE samplingfeaturecode = \'%s\'),
+    (SELECT newact.actionid FROM newact))
+  RETURNING featureactionid),
+
+  newresult AS (
+  INSERT INTO odm2.results (
+    featureactionid, resultuuid, resulttypecv, variableid, unitsid, processinglevelid, sampledmediumcv, valuecount)
+  VALUES (
+    
+    (SELECT newfa.featureactionid FROM newfa),
+    \'%s\',
+    \'%s\',
+    (SELECT variableid FROM odm2.variables WHERE variablecode = \'methane\'),
+    (SELECT unitsid FROM odm2.units WHERE unitsabbreviation = \'ppm\'),
+    \'%s\',
+    \'%s\',
+    \'%s\'),
+  (
+    (SELECT newfa.featureactionid FROM newfa),
+    \'%s\',
+    \'%s\',
+    (SELECT variableid FROM odm2.variables WHERE variablecode = \'carbonDioxide\'),
+    (SELECT unitsid FROM odm2.units WHERE unitsabbreviation = \'ppm\'),
+    \'%s\',
+    \'%s\',
+    \'%s\')
+  RETURNING resultid, variableid),
+
+  newmr1 AS (
+  INSERT INTO odm2.measurementresults (
+    resultid,
+    censorcodecv,
+    qualitycodecv,
+    aggregationstatisticcv,
+    timeaggregationinterval,
+    timeaggregationintervalunitsid)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'methane\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\', 
+    \'%s\', 
+    \'%s\')),
+
+  newmrv1 AS (
+  INSERT INTO odm2.measurementresultvalues (
+    resultid,
+    datavalue,
+    valuedatetime,
+    valuedatetimeutcoffset)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'methane\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\')),
+
+  newmr3 AS (
+  INSERT INTO odm2.measurementresults (
+    resultid,
+    censorcodecv,
+    qualitycodecv,
+    aggregationstatisticcv,
+    timeaggregationinterval,
+    timeaggregationintervalunitsid)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'carbonDioxide\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\', 
+    \'%s\', 
+    \'%s\'))
+
+  INSERT INTO odm2.measurementresultvalues (
+    resultid,
+    datavalue,
+    valuedatetime,
+    valuedatetimeutcoffset)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'carbonDioxide\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\')
+    
+'
+
+```
+
+Not sure if sampled medium should be liquidAqueous for HS samples and gas for air samples, or gas for both. Using gas for both now. 
+
+Date time of measurement result values for ppm measurements on GC is linked back to field sampling datetime for now, even though that is the specimen collection action not the specimen analysis action, because the date time of the GC run is not important except for merging data.
+
+```{r}
+db_insert_gc_results <- function(x){
+  sql_blanks <- 'WITH
+  newact AS (
+  INSERT INTO odm2.actions (
+    actiontypecv, methodid, begindatetime, begindatetimeutcoffset)
+  VALUES (
+    \'%s\', 
+    (SELECT methodid FROM odm2.methods WHERE methodcode = \'%s\'), 
+    \'%s\', 
+    \'%s\')
+  RETURNING actionid),
+
+  newfa AS (
+  INSERT into odm2.featureactions (
+    samplingfeatureid, actionid)
+  VALUES (
+    (SELECT samplingfeatureid FROM odm2.samplingfeatures WHERE samplingfeaturecode = \'%s\'),
+    (SELECT newact.actionid FROM newact))
+  RETURNING featureactionid),
+
+  newresult AS (
+  INSERT INTO odm2.results (
+    featureactionid, resultuuid, resulttypecv, variableid, unitsid, processinglevelid, sampledmediumcv, valuecount)
+  VALUES (
+    
+    (SELECT newfa.featureactionid FROM newfa),
+    \'%s\',
+    \'%s\',
+    (SELECT variableid FROM odm2.variables WHERE variablecode = \'methane\'),
+    (SELECT unitsid FROM odm2.units WHERE unitsabbreviation = \'ppm\'),
+    \'%s\',
+    \'%s\',
+    \'%s\'),
+  (
+    (SELECT newfa.featureactionid FROM newfa),
+    \'%s\',
+    \'%s\',
+    (SELECT variableid FROM odm2.variables WHERE variablecode = \'carbonDioxide\'),
+    (SELECT unitsid FROM odm2.units WHERE unitsabbreviation = \'ppm\'),
+    \'%s\',
+    \'%s\',
+    \'%s\')
+  RETURNING resultid, variableid),
+
+  newmr1 AS (
+  INSERT INTO odm2.measurementresults (
+    resultid,
+    censorcodecv,
+    qualitycodecv,
+    aggregationstatisticcv,
+    timeaggregationinterval,
+    timeaggregationintervalunitsid)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'methane\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\', 
+    \'%s\', 
+    \'%s\')),
+
+  newmrv1 AS (
+  INSERT INTO odm2.measurementresultvalues (
+    resultid,
+    datavalue,
+    valuedatetime,
+    valuedatetimeutcoffset)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'methane\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\')),
+
+  newmr3 AS (
+  INSERT INTO odm2.measurementresults (
+    resultid,
+    censorcodecv,
+    qualitycodecv,
+    aggregationstatisticcv,
+    timeaggregationinterval,
+    timeaggregationintervalunitsid)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'carbonDioxide\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\', 
+    \'%s\', 
+    \'%s\'))
+
+  INSERT INTO odm2.measurementresultvalues (
+    resultid,
+    datavalue,
+    valuedatetime,
+    valuedatetimeutcoffset)
+  VALUES (
+    (SELECT newresult.resultid FROM newresult WHERE variableid = (SELECT variableid FROM odm2.variables WHERE variablecode = \'carbonDioxide\')),
+    \'%s\',
+    \'%s\', 
+    \'%s\')
+    
+'
+  sql <- sprintf(sql_blanks, 
+        "specimenAnalysis", # actiontypecv
+        "GC", # methodcode
+        gc_for_db$gc_datetime[x], # begindatetime
+        utcoffset, # utcoffset
+        gc_for_db$Exetainer_ID[x], # samplingfeaturecode of sample
+        UUIDgenerate(), #uuid
+        "measurement", # resulttypecv
+        3, # processinglevelid level 2 - derived from calibration curve
+        "gas",# sampledmediumcv
+        1,
+        UUIDgenerate(), #uuid
+        "measurement", # resulttypecv
+        3, # processinglevelid level 2 - derived from calibration curve
+        "gas",# sampledmediumcv
+        1, # valuecount# valuecount
+        # methane results
+        "notCensored", "unknown", "sporadic", 1, 1157, 
+        gc_for_db$ch4_ppm[x], gc_for_db$datetime[x], utcoffset,
+        # carbon dioxide results
+        "notCensored", "unknown", "sporadic", 1, 1157,
+        gc_for_db$co2_ppm[x], gc_for_db$datetime[x], utcoffset
+        )
+  
+  sql <- gsub("\n", "", sql)
+  dbGetQuery(db, sql)
+}
+  
+```
+
+insert results. Doesn't seem to work with NAs
+
+```{r}
+db_insert_gc_results(1) # one at a time
+
+lapply(2:nrow(gc_for_db), function(x) db_insert_gc_results(x)) # or multiple
+
+```
+
+# Query
+
+try to get ppm data for TBair KLH 521
+
+```{r}
+sql <- "SELECT mrv.datavalue, mrv.valuedatetime, sf.samplingfeaturecode, r.featureactionid, v.variablecode, u.unitsname 
+  FROM odm2.measurementresultvalues mrv, odm2.results r, odm2.variables v, odm2.units u, odm2.samplingfeatures sf, odm2.featureactions fa
+ WHERE r.variableid = v.variableid 
+ AND r.featureactionid = fa.featureactionid
+ AND fa.samplingfeatureid = sf.samplingfeatureid
+ AND r.unitsid = u.unitsid
+ AND mrv.resultid = r.resultid 
+ AND r.sampledmediumcv = 'gas'
+ AND sf.samplingfeaturecode = 'KLH 521'"
+
+sql <- gsub("\n", "", sql)
+dbGetQuery(db, sql)
+```
 
