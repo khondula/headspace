@@ -1,0 +1,33 @@
+WITH
+  newsf AS (
+  INSERT INTO odm2.samplingfeatures (
+    samplingfeaturecode, samplingfeaturename, samplingfeaturetypecv, samplingfeatureuuid)
+  VALUES (
+    'KLH Feb18 QBair', 'HSair sample KLH Feb18 QBair', 'specimen', '969823d8-7103-422f-8285-9f1730f8bc73')
+  RETURNING samplingfeatureid),
+
+  newrelation AS (
+  INSERT INTO odm2.relatedfeatures (
+    samplingfeatureid, relationshiptypecv, relatedfeatureid)
+  VALUES (
+    (SELECT newsf.samplinfeatureid FROM newsf),
+    'wasCollectedAt',
+    (SELECT samplingfeatureid FROM odm2.samplingfeatures WHERE samplingfeaturecode = 'QB'))),
+
+  newact AS (
+  INSERT INTO odm2.actions (
+    actiontypecv, methodid, begindatetime, begindatetimeutcoffset)
+  VALUES (
+    'specimenCollection', 
+    (SELECT methodid FROM odm2.methods WHERE methodcode = 'HSair'), 
+    '2018-02-09 11:23:00', 
+    '-5')
+  RETURNING actionid),
+
+  newfa AS (
+  INSERT into odm2.featureactions (
+    samplingfeatureid, actionid)
+  VALUES (
+    (SELECT newsf.samplingfeatureid FROM newsf),
+    (SELECT newact.actionid FROM newact))
+  RETURNING featureactionid)

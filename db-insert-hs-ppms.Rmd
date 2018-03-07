@@ -1,0 +1,412 @@
+---
+title: "Headspace sample processing Part 1"
+output: 
+  html_document:
+    toc: yes
+    toc_float:
+      collapsed: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(readr)
+library(dplyr)
+library(RPostgreSQL)
+library(uuid)
+```
+
+```{r connect, include=FALSE, message=FALSE}
+password <- scan(".pgpass", what="")
+db <- dbConnect(PostgreSQL(), 
+                host = "sesync-postgis01.research.sesync.org",
+                dbname = "choptank", 
+                user = "palmergroup",
+                password = password)
+```
+
+## Description
+
+insert GC data into database
+
+## Data
+
+gc_results_db_test file should have all necessary sample information
+add in site relationships with separate table of relationships (hasPart? isPartOf? isRelatedTo?)
+
+```{r data, message=FALSE}
+gc_data <- read_csv("data/gc_results_db_test.csv")
+hs_sources <- read_csv("data/headspace_sources.csv")
+```
+
+```{r}
+gc_for_db <- gc_data %>% 
+  filter(Method %in% c("HS", "air")) %>%
+  dplyr::select(Field_sample_date, Exetainer_ID, Site, Method, Time, ch4_ppm, co2_ppm, gc_date, gc_time)
+```
+
+## Database checks
+
+Make sure all the metadata fields exist in the database
+
+**Sites**
+
+Compare the site names in the input data to the sampling feature codes in the database
+
+```{r checksites}
+dbsites <- dbGetQuery(db, "SELECT samplingfeaturecode FROM odm2.samplingfeatures WHERE samplingfeaturetypecv = 'site'")
+sites <- unique(gc_for_db$Site)
+
+data.frame(sites = sites,
+           in_db = sites %in% dbsites$samplingfeaturecode) %>% 
+  arrange(in_db) %>% kable()
+```
+
+add new sites to database if needed
+
+```{r addsites, eval=FALSE}
+db_add_site(samplingfeaturecode = "BBout", samplingfeaturedescription = "outflow of Bubbly Bay", samplingfeaturename = "BB out", samplingfeaturetypecv = "site")
+
+db_add_site(samplingfeaturecode = "TBwell", samplingfeaturedescription = "TB center well", samplingfeaturename = "TB well", samplingfeaturetypecv = "site")
+
+db_add_site(samplingfeaturecode = "TBin", samplingfeaturedescription = "presumed inflow of TB between ditch T and TB", samplingfeaturename = "TBin", samplingfeaturetypecv = "site")
+
+db_add_site(samplingfeaturecode = "TBout", samplingfeaturedescription = "outflow of TB away from ditch T", samplingfeaturename = "TB out", samplingfeaturetypecv = "site")
+
+```
+
+**Method**
+
+check for method
+```{r checkmethods, eval=FALSE }
+dbGetQuery(db, "SELECT * FROM odm2.methods")
+```
+```{r checkmethods2, eval=TRUE,echo=FALSE }
+dbGetQuery(db, "SELECT * FROM odm2.methods") %>% kable()
+```
+
+Add new methods if they don't exist
+
+```{r addmethods, eval=FALSE}
+db_add_method(methodtypecv = "specimenCollection",
+              methodcode = "HS",
+              methodname = "Headspace dissolved gas",
+              methoddescription = "Collect headspace dissolved gas sample")
+
+db_add_method(methodtypecv = "specimenCollection",
+              methodcode = "HSair",
+              methodname = "Headspace source air",
+              methoddescription = "Collect source air for headspace dissolved gas measurement")
+```
+
+**Variables**
+
+check for variables
+
+```{r checkvars, eval=FALSE}
+dbGetQuery(db, "SELECT * FROM odm2.variables")
+```
+```{r checkvars2, echo=FALSE}
+dbGetQuery(db, "SELECT * FROM odm2.variables") %>% kable()
+```
+
+add variables 
+```{r addvars, eval=FALSE}
+db_add_new_variable(variabletypecv = "WaterQuality", variablecode = "methane", variablenamecv = "Methane", variabledefinition = "Methane (CH4)")
+db_add_new_variable(variabletypecv = "WaterQuality", variablecode = "carbonDioxide", variablenamecv = "Carbon dioxide", variabledefinition = "Carbon dioxide (CO2)")
+```
+
+**Units**
+
+check for units
+
+```{r checkunits, eval=FALSE}
+dbGetQuery(db, "SELECT * FROM odm2.units WHERE unitsabbreviation = 'ppm'")
+```
+```{r checkunits2, include=FALSE}
+dbGetQuery(db, "SELECT * FROM odm2.units WHERE unitsabbreviation = 'ppm'") %>% kable()
+```
+
+add necessary units if they aren't there
+
+## Insert sample values
+
+Each row in the `gc_for_db` table represents one **specimen** sampling feature that **wasCollectedAt** a wetland or stream sampling feature **site**
+
+```{r}
+head(gc_for_db) %>% kable()
+gc_for_db$methodcode <- replace(gc_for_db$Method, which(gc_for_db$Method == "air"), "HSair")
+```
+
+**datetime formatting**
+
+combine the Field sample date and Time columns into one
+
+```{r}
+gc_for_db$datetime <- strptime(paste(gc_for_db$Field_sample_date, gc_for_db$Time),
+         format = "%d-%b-%y %H:%M:%S", tz = "")
+```
+
+**utc offset**
+
+```{r}
+utcoffset <- format(Sys.time(), "%z")
+utcoffset <- as.integer(substr(utcoffset, 1,3))
+```
+
+```{r}
+resulttypecv = "measurement"
+censorcodecv = "notCensored"
+qualitycodecv = "unknown"
+aggregationstatisticcv = "sporadic"
+timeaggregationinterval = 1 # assume 1 minute
+timeaggregationintervalunitsid = 1157 # minute
+processlinglevel = 2
+valuecount = 1
+```
+
+## Insert new samples
+
+add new samples, action for collecting that sample, relationship to site it was collected at
+
+* add HS or air sample to sampling feature list as a specimen 
+* for HS samples specimen medium is liquidAqueous
+* for air samples specimen medium is gas
+* related to site using wasCollectedAt relationship type
+* add action for sample collection at date and time of field collection
+* add feature action with new sample and new action for sample collection
+
+```{r, include=FALSE, eval=FALSE}
+sql_blanks <- 'WITH
+  newsf AS (
+  INSERT INTO odm2.samplingfeatures (
+    samplingfeaturecode, samplingfeaturename, samplingfeaturetypecv, samplingfeatureuuid)
+  VALUES (
+    \'%s\', \'%s\', \'%s\', \'%s\')
+  RETURNING samplingfeatureid),
+
+  newrelation AS (
+  INSERT INTO odm2.relatedfeatures (
+    samplingfeatureid, relationshiptypecv, relatedfeatureid)
+  VALUES (
+    (SELECT newsf.samplinfeatureid FROM newsf),
+    \'%s\',
+    (SELECT samplingfeatureid FROM odm2.samplingfeatures WHERE samplingfeaturecode = \'%s\'))),
+
+  newact AS (
+  INSERT INTO odm2.actions (
+    actiontypecv, methodid, begindatetime, begindatetimeutcoffset)
+  VALUES (
+    \'%s\', 
+    (SELECT methodid FROM odm2.methods WHERE methodcode = \'%s\'), 
+    \'%s\', 
+    \'%s\')
+  RETURNING actionid),
+
+  newfa AS (
+  INSERT into odm2.featureactions (
+    samplingfeatureid, actionid)
+  VALUES (
+    (SELECT newsf.samplingfeatureid FROM newsf),
+    (SELECT newact.actionid FROM newact))
+  RETURNING featureactionid)'
+
+```
+
+generalize this with dataframe named samples and sample id column as sample id
+
+```{r, include=FALSE, eval=FALSE}
+x = 1
+sql <- sprintf(sql_blanks, 
+        gc_for_db$Exetainer_ID[x], # samplingfeaturecode
+        paste(gc_for_db$methodcode[x], "sample", gc_for_db$Exetainer_ID[x]), # samplingfeaturename
+        "specimen", # samplingfeaturetypecv
+        UUIDgenerate(), # samplingfeatureuuid
+        "wasCollectedAt", # relationshiptypecv
+        gc_for_db$Site[x], # samplingfeaturecode (related feature)
+        "specimenCollection", # actiontypecv
+        gc_for_db$methodcode[x], # methodcode
+        gc_for_db$datetime[x], # begindatetime
+        utcoffset # utcoffset
+        )
+```
+
+```{r, include=FALSE, eval=FALSE}
+write(sql, "example_insert_query.txt")
+```
+
+```{r, include=FALSE, eval=FALSE}
+sql <- gsub("\n", "", sql)
+```
+
+**Function to insert new samples**
+
+```{r define_db_insert_samples}
+db_insert_samples <- function(x){
+  sql_blanks <- 'WITH
+  newsf AS (
+  INSERT INTO odm2.samplingfeatures (
+    samplingfeaturecode, samplingfeaturename, samplingfeaturetypecv, samplingfeatureuuid)
+  VALUES (
+    \'%s\', \'%s\', \'%s\', \'%s\')
+  RETURNING samplingfeatureid),
+
+  newrelation AS (
+  INSERT INTO odm2.relatedfeatures (
+    samplingfeatureid, relationshiptypecv, relatedfeatureid)
+  VALUES (
+    (SELECT newsf.samplingfeatureid FROM newsf),
+    \'%s\',
+    (SELECT samplingfeatureid FROM odm2.samplingfeatures WHERE samplingfeaturecode = \'%s\'))),
+
+  newact AS (
+  INSERT INTO odm2.actions (
+    actiontypecv, methodid, begindatetime, begindatetimeutcoffset)
+  VALUES (
+    \'%s\', 
+    (SELECT methodid FROM odm2.methods WHERE methodcode = \'%s\'), 
+    \'%s\', 
+    \'%s\')
+  RETURNING actionid)
+
+  INSERT INTO odm2.featureactions (
+    samplingfeatureid, actionid)
+  VALUES (
+    (SELECT newsf.samplingfeatureid FROM newsf),
+    (SELECT newact.actionid FROM newact))
+  RETURNING featureactionid'
+  
+  sql <- sprintf(sql_blanks, 
+        gc_for_db$Exetainer_ID[x], # samplingfeaturecode
+        paste(gc_for_db$methodcode[x], "sample", gc_for_db$Exetainer_ID[x]), # samplingfeaturename
+        "specimen", # samplingfeaturetypecv
+        UUIDgenerate(), # samplingfeatureuuid
+        "wasCollectedAt", # relationshiptypecv
+        gc_for_db$Site[x], # samplingfeaturecode (related feature)
+        "specimenCollection", # actiontypecv
+        gc_for_db$methodcode[x], # methodcode
+        gc_for_db$datetime[x], # begindatetime
+        utcoffset # utcoffset
+        )
+  sql <- gsub("\n", "", sql)
+  dbGetQuery(db, sql)
+}
+```
+
+Run function on new dataset - edit this so it just accepts the dataframe
+
+```{r insertsamples, eval=FALSE}
+db_insert_samples(1) # one at a time
+lapply(2:nrow(gc_for_db), function(x) db_insert_samples(x)) # or multiple
+```
+
+Get feature action with information
+
+```{r}
+db_get_featureaction <- function(featureactionid = 309){
+  sql <- sprintf("SELECT fa.featureactionid, sf.samplingfeaturecode, act.actiontypecv, act.begindatetime, m.methodcode 
+                 FROM odm2.featureactions fa, odm2.samplingfeatures sf, odm2.actions act, odm2.methods m
+                 WHERE fa.samplingfeatureid = sf.samplingfeatureid
+                 AND fa.actionid = act.actionid
+                 AND act.methodid = m.methodid
+                 AND fa.featureactionid = '%s'", featureactionid)
+  
+  sql <- gsub("\n", "", sql)
+  dbGetQuery(db, sql)
+}
+```
+
+```{r}
+db_get_featureaction(341) %>% kable()
+```
+
+
+## Add source air relationships
+
+* add relationships between source gas and hs samples
+
+Not sure what this type of relationship should be. Source gas for headspace samples is part of the headspace sample, and then it is corrected for later in the calculation of dissolved gas in the original water sample. (Should probably update method description to make a note of the sample being diluted by the concentration of the source air, with specific volumes of the sample and source air.)
+
+For now, let's say the source gas sample **isPartOf** the headspace gas sample. 
+
+```{r}
+head(hs_sources) %>% kable()
+```
+
+Join the sampling features table from the database to the dataframe with the relationships to get the IDs. This is a sequence of two joins to get the ids for the child and parent sampling features. These joins could also be done on the SQL side.
+
+Get sampling ids from the samplingfeatures table
+
+```{r}
+specimens <- dbGetQuery(db, "SELECT samplingfeatureid, samplingfeaturecode FROM odm2.samplingfeatures WHERE samplingfeaturetypecv = 'specimen'")
+```
+
+
+```{r}
+new_related_samples <- hs_sources %>%  
+  left_join(specimens, by = c("headspace_sample_id" = "samplingfeaturecode")) %>% 
+  rename(relatedfeatureid = samplingfeatureid) %>%
+  mutate(relationshiptypecv = "isPartOf") %>%
+  left_join(specimens, by = c("source_gas_sample_id" = "samplingfeaturecode")) %>%
+  dplyr::select(samplingfeatureid, relationshiptypecv, relatedfeatureid)
+```
+
+Update table in database
+
+```{r, eval= FALSE}
+dbWriteTable(db, c("odm2","relatedfeatures"),
+             new_related_samples,
+             overwrite = FALSE,
+             row.names = FALSE,
+             append = TRUE)
+```
+
+Get all headspace samples and paired source air samples
+
+```{r}
+db_get_hs_sources <- function(){
+  sql <- "WITH t1 AS(
+    SELECT 
+      REL.samplingfeatureid,
+      SF.samplingfeaturecode,
+      REL.relationshiptypecv,
+      REL.relatedfeatureid
+    FROM 
+     odm2.relatedfeatures REL,
+     odm2.samplingfeatures SF
+    WHERE 
+     REL.samplingfeatureid = SF.samplingfeatureid
+     AND REL.relationshiptypecv = 'isPartOf')
+
+    SELECT
+      t1.samplingfeaturecode source,
+      SF2.samplingfeaturecode HS
+    FROM
+      t1,
+      odm2.samplingfeatures SF2
+    WHERE
+      t1.relatedfeatureid = SF2.samplingfeatureid
+  "
+sql <- gsub("\n", " ", sql)
+
+dbGetQuery(db, sql)  
+}
+
+```
+
+```{r}
+db_get_hs_sources() %>% kable()
+```
+
+## Insert sample data
+
+* add action for specimen analysis 
+* add feature action with new sample and new action for sample analysis
+* add 2 results associated with sample analysis feature action - co2 ppm and ch4 ppm
+* variable = methane (methaneDissolved comes later), carbonDioxide
+* units = ppm, Part per Million
+* add measurement results 
+* add measurement result values
+
