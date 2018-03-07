@@ -16,6 +16,9 @@ library(readr)
 library(dplyr)
 library(RPostgreSQL)
 library(uuid)
+library(tidyr)
+library(lubridate)
+library(magrittr)
 ```
 
 ```{r connect, include=FALSE, message=FALSE}
@@ -29,7 +32,7 @@ db <- dbConnect(PostgreSQL(),
 
 ## Description
 
-insert dissolved gas concentration data into database
+Calculate dissolved gas concentrations for headspace samples from PPM data. Then insert dissolved gas concentration data into database.
 
 ## Data
 
@@ -41,11 +44,122 @@ insert dissolved gas concentration data into database
 * source gas sample volume - default 20 mL
 * sample gas sample volume - default 40 mL
 
+**PPM data**
+
 Reshape the data so there is one row for each headspace sample with the required inputs for the `def.calc.sdg()` function. 
+
+```{r, include=FALSE}
+source('R/db_get_hs_sources.R')
+```
+
+```{r}
+hs_sources <- db_get_hs_sources() 
+hs_sources %>% kable()
+```
+
+Get the methane and co2 ppm data for each sample 
+
+```{r}
+db_get_gc_data <- function(){
+sql <- "SELECT sf.samplingfeaturecode, v.variablecode, u.unitsname, mrv.datavalue, mrv.valuedatetime  
+  FROM odm2.measurementresultvalues mrv, odm2.results r, odm2.variables v, odm2.units u, odm2.samplingfeatures sf, odm2.featureactions fa, odm2.methods m, odm2.actions act
+ WHERE r.variableid = v.variableid
+ AND fa.actionid = act.actionid
+ AND act.methodid = m.methodid
+ AND r.featureactionid = fa.featureactionid
+ AND fa.samplingfeatureid = sf.samplingfeatureid
+ AND r.unitsid = u.unitsid
+ AND mrv.resultid = r.resultid 
+ AND r.sampledmediumcv = 'gas'
+ AND m.methodcode = 'GC'"
+
+sql <- gsub("\n", "", sql)
+dbGetQuery(db, sql)
+}
+```
+```{r}
+ppms <- db_get_gc_data()
+ppms %>% kable()
+```
+
+Now we have hs sources and the ppm data. Join in wide format for the sdg function
+
+```{r}
+sdg_data <- hs_sources %>% 
+  left_join(ppms, by = c("source" = "samplingfeaturecode")) %>%
+  dplyr::select(-unitsname, -valuedatetime) %>%
+  filter(variablecode %in% c("carbonDioxide", "methane")) %>%
+  spread(key = variablecode, value = datavalue) %>%
+  rename(concentrationCO2Air = carbonDioxide, concentrationCH4Air = methane) %>%
+  left_join(ppms, by = c("hs" = "samplingfeaturecode")) %>%
+  dplyr::select(-unitsname) %>%
+  filter(variablecode %in% c("carbonDioxide", "methane")) %>%
+  spread(key = variablecode, value = datavalue) %>%
+  rename(concentrationCO2Gas = carbonDioxide, concentrationCH4Gas = methane)
+```
+
+get table of where each sample was collected 
+
+```{r, warning=FALSE}
+sql <- "SELECT * FROM odm2.relatedfeatures WHERE relationshiptypecv = 'wasCollectedAt'"
+sql <- gsub("\n", "", sql)
+rf <- dbGetQuery(db, sql)
+sampfeatures <- dbReadTable(db, c("odm2", "samplingfeatures"))
+samps_join_sites <- rf %>% 
+  left_join(sampfeatures, by = c("samplingfeatureid" = "samplingfeatureid")) %>%
+  dplyr::select(relationid, samplingfeaturecode, relationshiptypecv, relatedfeatureid) %>%
+  rename(specimencode = samplingfeaturecode) %>%
+  left_join(sampfeatures, by = c("relatedfeatureid" = "samplingfeatureid")) %>%
+  dplyr::select(specimencode, relationshiptypecv, samplingfeaturecode)
+kable(samps_join_sites)
+```
+
+add sites to sdg data
+
+```{r}
+sdg_data %<>% left_join(samps_join_sites, by = c("hs" = "specimencode")) %>%
+  dplyr::select(- relationshiptypecv) %>% rename(site = samplingfeaturecode)
+```
+
+**Water Temp**
+
+add in water temp data from field data collection. 
+
+**Barometric pressure**
+
+Add column for barometric pressure and temp on day of sampling from Dover AFB GSOD data. 
+
+```{r, message=FALSE}
+gsod <- read_csv("data/gsod_data.csv")
+```
+
+convert gsod data from mb to kPa
+
+```{r}
+gsod$STP_kPa <- gsod$STP*0.1
+gsod$TEMP_C <- gsod$TEMP
+```
+
+
+relevant columns in gsod data are YEARMODA, STP_kPa, TEMP. TEMP is mean daily temperature in Celcius (GSOD package does conversion to SI units).
+
+```{r}
+sdg_data$date <- date(sdg_data$valuedatetime)
+gsod %<>% dplyr::select(YEARMODA, STP_kPa, TEMP_C)
+sdg_data %<>% left_join(gsod, by = c("date" = "YEARMODA"))
+```
+
+```{r}
+sdg_data$concentrationN2OAir = NA
+sdg_data$concentrationN2OGas = NA
+sdg_data %<>% mutate(headspaceTemp = TEMP_C) %>% 
+  rename(barometricPressure = STP_kPa, waterTemp = TEMP_C) %>%
+  mutate(gasVolume = 20, waterVolume = 40)
+```
 
 # Calculations
 
-Calculations are based on the NEON dissolved gas function. Add proper citation [here](). 
+Calculations are based on the NEON dissolved gas function. Add proper citation to [here](https://github.com/NEONScience/NEON-dissolved-gas). 
 
 ```{r}
 source('def.calc.sdg.R')
@@ -54,17 +168,19 @@ source('def.calc.sdg.R')
 Use function by supplying column names and defaults. Output is concentrations and 100% saturation concentrations as additional columns on the data frame. 
 
 ```{r, eval=FALSE}
-sdg_out <- def.calc.sdg(inputFile = sdg_data, 
-                        volGas = 20,
-                        volH2O = 40,
-                        baro = STP_kPa,
-                        waterTemp = waterTemp,
-                        headspaceTemp = waterTemp,
-                        eqCO2 = ppm_CO2_sample,
-                        sourceCO2 = ppm_CO2_source,
-                        eqCH4 = ppm_CH4_sample,
-                        sourceCH4 = ppm_CH4_source)
+sdg_out <- def.calc.sdg(inputFile = sdg_data)
 ```
+
+output is in [M]
+
+```{r}
+sdg_results <- sdg_out %>%
+  mutate(dissolvedCH4_umol = dissolvedCH4 * 1e6,
+         dissolvedCO2_umol = dissolvedCO2 * 1e6,
+         satCH4_umol = satCH4 * 1e6) %>%
+  dplyr::select(hs, site, date, valuedatetime, dissolvedCH4_umol, dissolvedCO2_umol, satCH4_umol)
+```
+
 
 Reshape concentration data to put values in database for each sample
 
