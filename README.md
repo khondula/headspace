@@ -37,4 +37,4 @@ Tools for processing dissolved gas sample data
 * Global summary daily weather data for Dover AFB station, retrieved with the `GSODR` [package](https://github.com/ropensci/GSODR)
 
  
-> This work is part of my "Enhancing Reproducibility in Watershed Science" projected supported by [rOpenSci](https://ropensci.org/) and [SESYNC](https://www.sesync.org/).
+> This work is part of my "[Enhancing Reproducibility in Watershed Science](https://ropensci.org/blog/2018/02/14/announcing-2018-ropensci-fellows/)" project supported by [rOpenSci](https://ropensci.org/) and [SESYNC](https://www.sesync.org/).
