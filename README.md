@@ -1,6 +1,23 @@
-# headspace
+# headspaceR
 
-Tools for processing dissolved gas sample data
+Tools for processing dissolved gas sample data in R.
+
+Workflow:
+
+- Inputs needed: 
+    1. File with peak areas from GC (one row per sample) containing a "machineID" column
+    1. File with calibration curve data
+    1. File to match "machineID" to field sample ID
+- If the calibration curve data and sample ID data are in the same file, use XX function to separate them into 2 files
+
+
+1. Use `gc-calc-ppms.Rmd` worksheet to calculate PPM from peak areas and calibration curves, and save file of ppms_ID-ID.csv - make this a function of the input files
+1. Then use `ppms_add_field_info` (just R currently, not Rmd) to add field sample IDs, merging on machine ID. save csv file of ppms_sampleinfo **get this file to return NA values**
+- *If adding to database* use `db-insert-hs-ppms.Rmd` to add ppm values to database
+- then use `hs-calcs-DATE.R` to calculate dissolved gas concentrations **update to include more input options** and save sdg_results
+- *add sdg results to database*
+
+### directory structure
 
 ```
 ├──db-insert-hs-ppms.Rmd
